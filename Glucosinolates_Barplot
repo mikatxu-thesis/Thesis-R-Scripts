@@ -1,0 +1,78 @@
+library(tidyverse)
+Glucosinolates <- read.csv2("241007_GlucosinolatesR.csv")
+
+Glucosinolates2 <- select(Glucosinolates, -X)
+
+Glucosinolates2 <- Glucosinolates2 %>%
+  rename (XI3M = I3M)
+
+Glucosinolates_long <- Glucosinolates2 %>%
+  pivot_longer(cols = starts_with("X"), # Seleccionar las columnas de los compuestos
+               names_to = "compound",          # Nueva columna para nombres de compuestos
+               values_to = "value")            # Nueva columna para los valores de los compuestos
+
+# Ver el nuevo dataframe en formato largo
+head(Glucosinolates_long)
+
+# Asegurarnos de que el tratamiento esté bien ordenado dentro de cada especie
+Glucosinolates_long$treatment <- factor(Glucosinolates_long$treatment, levels = c("Control", "Bcc", "Bion"))
+
+# Convertir la columna 'value' a numérico (asegurar que sea un valor continuo)
+Glucosinolates_long$value <- as.numeric(as.character(Glucosinolates_long$value))
+
+# Crear una nueva variable combinando species y treatment para el eje X
+Glucosinolates_long$species_treatment <- interaction(Glucosinolates_long$species, Glucosinolates_long$treatment)
+
+#Calcular media y desviación estándar por species, treatment y compound
+summary_data <- Glucosinolates_long %>%
+  group_by(species, treatment, compound) %>%
+  summarise(mean_value = mean(value, na.rm = TRUE),
+            sd_value = sd(value, na.rm = TRUE))
+
+# Calcular el valor máximo para cada compound considerando las barras de error
+summary_data <- summary_data %>%
+  mutate(max_value = mean_value + sd_value)
+
+# Ahora calculamos los máximos por compuesto
+compound_max <- summary_data %>%
+  group_by(compound) %>%
+  summarise(ymax = max(max_value))
+
+#colores personalizados
+custom_colors <- c("Control" = "#BFBFBF",  # Gris claro
+                   "Bcc" = "#6B8FFF",      # Azul claro
+                   "Bion" = "#7FFF8A")     # Verde claro
+
+custom_colors_points <- c("Control" = "#4C4C4C",
+                          "Bcc"= "#00138E",
+                          "Bion"= "#054D00")
+
+# Crear el gráfico con espacio entre barras, bordes negros y ejes personalizados
+# Crear el gráfico con espacio entre barras, bordes negros en ejes izquierdo e inferior
+ggplot(summary_data, aes(x = species, y = mean_value, fill = treatment)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.85),
+           width = 0.4, color = "black") +
+  geom_errorbar(aes(ymin = mean_value - sd_value, ymax = mean_value + sd_value),
+                width = 0.2, position = position_dodge(width = 0.85)) +
+  geom_point(data = Glucosinolates_long, aes(x = species, y = value, color = treatment), 
+             position = position_jitterdodge(dodge.width = 0.85, jitter.width = 0.1),
+             size = 0.8, alpha = 0.8) +  # Ajusta el tamaño y la transparencia de los puntos
+  facet_wrap(~ compound, scales = "free_y") +                               # Crear facetas por glucosinolato
+  scale_fill_manual(values = custom_colors) +                                  # Usar colores personalizados para las barras
+  scale_color_manual(values = custom_colors_points) +                                 # Usar los mismos colores para los puntos
+  labs(
+    title = "Glucosinolates",          # Cambiar el título aquí
+    x = NULL,                                                               # Eliminar el nombre del eje X
+    y = "μmol/g FW"                                      # Cambiar el nombre del eje Y aquí
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +               # Añadir un pequeño margen superior
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12),                      # Tamaño del texto en las facetas
+    axis.text.x = element_text(angle = 45, hjust = 1),         # Rotación de etiquetas del eje X
+    axis.title.x = element_blank(),                              # Asegurarse de que no haya título visible en el eje X
+    axis.title.y = element_text(margin = margin(t = 10)),       # Margen para el título del eje Y
+    axis.line.y = element_line(color = "black", size = 0.75),     # Borde negro en el eje Y (izquierdo)
+    axis.line.x = element_line(color = "black", size = 0.75),     # Borde negro en el eje X (inferior)
+    panel.border = element_rect(color = "black", fill = NA, size = 1)  # Borde del panel
+  )
