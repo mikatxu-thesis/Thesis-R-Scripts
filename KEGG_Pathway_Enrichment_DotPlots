@@ -1,0 +1,54 @@
+# --- Inputs ---
+infile        <- ""  # CSV con columnas que contienen ATGs
+column_name   <- ""                       # columna a analizar
+plot_title    <- "" # Título del DotPlot
+show_n        <- 12
+outdir        <- "" # Carpeta a guardar
+
+# --- Packages ---
+suppressPackageStartupMessages({
+  library(clusterProfiler)
+  library(org.At.tair.db)
+  library(dplyr)
+  library(ggplot2)
+  library(readr)
+})
+
+# --- Read list (auto-sep ; or ,) ---
+df <- tryCatch(read.csv2(infile, check.names = FALSE), error = function(e) read.csv(infile, check.names = FALSE))
+stopifnot(column_name %in% names(df))
+
+genes_tair <- unique(na.omit(trimws(as.character(df[[column_name]]))))
+genes_tair <- genes_tair[nzchar(genes_tair)]
+
+# --- Map TAIR -> ENTREZ ---
+map_input <- bitr(genes_tair, fromType = "TAIR", toType = "ENTREZID", OrgDb = org.At.tair.db)
+genes_entrez <- unique(na.omit(map_input$ENTREZID))
+
+# --- Universe: all TAIRs mappable to ENTREZ (genome-wide) ---
+all_tair <- keys(org.At.tair.db, keytype = "TAIR")
+map_uni  <- bitr(all_tair, fromType = "TAIR", toType = "ENTREZID", OrgDb = org.At.tair.db)
+universe_entrez <- unique(na.omit(map_uni$ENTREZID))
+
+stopifnot(length(genes_entrez) >= 5)
+
+# --- Enrichment ---
+ekegg <- enrichKEGG(
+  gene         = genes_entrez,
+  organism     = "ath",
+  keyType      = "ncbi-geneid",
+  universe     = universe_entrez,
+  pvalueCutoff = 1, qvalueCutoff = 0.05, minGSSize = 3
+)
+
+# --- Plot & export ---
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+p <- dotplot(ekegg, showCategory = show_n) +
+  scale_fill_gradient(low = "#75C9BC", high = "#A1DBB5", name = "adj. p-value") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.y = element_text(size = 12, face = "bold"),
+        plot.title  = element_text(size = 14, face = "bold")) +
+  labs(title = plot_title)
+
+ggsave(file.path(outdir, "kegg_dot.png"), p, width = 8, height = 6, dpi = 300, bg = "white")
+write.csv(as.data.frame(ekegg), file.path(outdir, "kegg_table.csv"), row.names = FALSE)
