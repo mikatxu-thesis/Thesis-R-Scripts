@@ -1,0 +1,119 @@
+## ============================
+##  PCA RNA-seq con DESeq2 (VST)
+## ============================
+
+## 0) Paquetes
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+pkgs <- c("data.table","ggplot2","plotly","DESeq2")
+for (p in pkgs) if (!requireNamespace(p, quietly = TRUE)) {
+  if (p == "DESeq2") BiocManager::install("DESeq2") else install.packages(p)
+}
+library(data.table); library(ggplot2); library(plotly); library(DESeq2)
+
+## 1) Cargar archivos (CSV)
+counts_dt  <- fread("250830_readcounts_vol.csv")
+coldata_dt <- fread("250830_coldata_vol.csv")
+
+## 2) Asegurar nombre GeneID y pasar a data.frame con rownames
+setnames(counts_dt, old = names(counts_dt)[1], new = "GeneID")
+counts_df <- as.data.frame(counts_dt)
+rownames(counts_df) <- counts_df$GeneID
+counts_df$GeneID <- NULL
+
+## 3) Alinear por SampleID
+stopifnot("SampleID" %in% names(coldata_dt))
+samples_common <- intersect(colnames(counts_df), coldata_dt$SampleID)
+stopifnot(length(samples_common) > 0)
+
+counts_df  <- counts_df[, samples_common, drop = FALSE]
+coldata_df <- as.data.frame(coldata_dt)
+coldata_df <- coldata_df[match(samples_common, coldata_df$SampleID), , drop = FALSE]
+rownames(coldata_df) <- coldata_df$SampleID
+stopifnot(identical(colnames(counts_df), rownames(coldata_df)))
+
+## 4) Limpiar NAs -> 0, asegurar enteros
+counts_df[is.na(counts_df)] <- 0L
+counts_df[] <- lapply(counts_df, function(x) as.integer(round(x)))
+
+## 5) Eliminar genes todo-cero y filtrado suave (≥10 en ≥4 muestras)
+counts_nz   <- counts_df[rowSums(counts_df) > 0, , drop = FALSE]
+keep        <- rowSums(counts_nz >= 10) >= 4
+counts_filt <- counts_nz[keep, , drop = FALSE]
+
+cat("Genes con algún conteo:", nrow(counts_nz), 
+    "\nGenes tras filtro (≥10 en ≥4 muestras):", nrow(counts_filt), "\n")
+
+## 6) Crear DESeq2 y aplicar VST (para PCA/heatmaps)
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_filt,
+  colData   = coldata_df,
+  design    = ~ Group
+)
+vsd     <- vst(dds, blind = TRUE)
+mat_vst <- assay(vsd)  # genes x muestras
+
+## 7) PCA sobre muestras
+pca <- prcomp(t(mat_vst), center = TRUE, scale. = FALSE)
+var_exp <- (pca$sdev^2) / sum(pca$sdev^2)
+scores <- as.data.frame(pca$x[, 1:3, drop = FALSE])
+scores$SampleID <- rownames(scores)
+scores <- merge(scores, coldata_df, by = "SampleID", sort = FALSE)
+ax <- paste0(c("PC1","PC2","PC3"), " (", round(100*var_exp[1:3], 1), "%)")
+
+## 8A) Gráfico 2D (ggplot)
+
+install.packages("ggrepel")
+library(ggrepel)
+
+p2d <- ggplot(scores, aes(PC1, PC2, color = Group, label = Replicate)) +
+  geom_point(size = 4, alpha = 0.8) +  # tamaño y transparencia del punto
+  geom_text_repel(size = 3, show.legend = FALSE) +  # etiqueta con réplica
+  scale_color_manual(values = c(
+    "0"    = "#A0A6A7",
+    "FR3"  = "#FCA08D",
+    "FR8"  = "#EE564B",
+    "FR24" = "#D2293D",
+    "W3"   = "#AADAD4",
+    "W8"   = "#63B1C1",
+    "W24"  = "#337B9F"
+  )) +
+  labs(
+    title = "PCA (PC1 vs PC2)",
+    x = ax[1],
+    y = ax[2]
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 10)
+  )
+print(p2d)
+
+## 8B) Gráfico 3D (plotly)
+p3d <- plot_ly(
+  scores,
+  x = ~PC1, y = ~PC2, z = ~PC3,
+  color = ~Group,
+  type = "scatter3d", mode = "markers",
+  text = ~paste0("Sample: ", SampleID,
+                 "<br>Group: ", Group,
+                 if ("Time" %in% names(scores)) paste0("<br>Time: ", Time) else "",
+                 if ("LightTreatment" %in% names(scores)) paste0("<br>Light: ", LightTreatment) else "",
+                 if ("Replicate" %in% names(scores)) paste0("<br>Rep: ", Replicate) else ""),
+  hoverinfo = "text",
+  marker = list(size = 4)
+) %>%
+  layout(
+    scene = list(
+      xaxis = list(title = ax[1]),
+      yaxis = list(title = ax[2]),
+      zaxis = list(title = ax[3])
+    ),
+    legend = list(title = list(text = "Group"))
+  )
+p3d  # se abre interactivo
+
+## 9) (Opcional) Guardar resultados
+write.csv(scores,  "250830_pca_scores_vst.csv", row.names = FALSE)
+write.csv(mat_vst, "250830_vst_matrix.csv",   row.names = TRUE)
