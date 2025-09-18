@@ -1,0 +1,162 @@
+# ==================== GO-BP barplot desde CSV (con GO.db) ====================
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+for (pkg in c("AnnotationDbi","org.At.tair.db","GO.db")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) BiocManager::install(pkg, ask = FALSE, update = FALSE)
+}
+for (pkg in c("dplyr","ggplot2","readr","stringr","forcats","tidyr")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+}
+
+library(dplyr); library(ggplot2); library(readr); library(stringr)
+library(forcats); library(tidyr)
+library(AnnotationDbi); library(org.At.tair.db); library(GO.db)
+
+# ---------- Parámetros ----------
+ruta_csv         <- ""
+columna_objetivo <- ""
+salida_dir       <- ""
+top_n            <- 25
+min_genes        <- 5
+wrap_width       <- 60
+png_width_in     <- 9; png_height_in <- 7; png_dpi <- 300
+dir.create(salida_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---------- Utilidades ----------
+es_agi <- function(x) stringr::str_detect(x, "^AT[1-5]G\\d{5}(?:\\.\\d+)?$")
+envolver <- function(x, width = 60) vapply(strwrap(x, width = width), paste, collapse = "\n", FUN.VALUE = "")
+
+# ---------- Cargar CSV (con ;) ----------
+df <- readr::read_csv2(
+  file = ruta_csv,
+  col_types = cols(.default = col_character()),
+  na = c("", "NA", "NaN")
+)
+names(df) <- trimws(names(df))
+
+if (!columna_objetivo %in% names(df)) {
+  stop(sprintf("La columna '%s' no existe. Columnas: %s", columna_objetivo, paste(names(df), collapse=", ")))
+}
+
+# ---------- Limpiar lista ----------
+genes <- df[[columna_objetivo]] |> as.character() |> na.omit() |> trimws() |> unique()
+stopifnot(length(genes) > 0)
+if (any(!es_agi(genes))) message("Aviso: se ignorarán no-AGI: ", paste(head(genes[!es_agi(genes)],5), collapse=", "))
+genes_agi <- genes[es_agi(genes)]
+if (length(genes_agi) == 0) stop("No hay IDs AGI válidos.")
+
+# ---------- Mapear GO (sin TERM) ----------
+map <- AnnotationDbi::select(
+  org.At.tair.db,
+  keys    = genes_agi,
+  keytype = "TAIR",
+  columns = c("GO", "ONTOLOGY")
+)
+# Puede ser 1:many; es esperado.
+
+# ---------- Traer TERM desde GO.db y unir ----------
+terms_df <- AnnotationDbi::select(
+  GO.db,
+  keys    = unique(na.omit(map$GO)),
+  keytype = "GOID",
+  columns = "TERM"
+)
+# Unir por GO
+map2 <- dplyr::left_join(map, terms_df, by = c("GO" = "GOID"))
+
+# ---------- Filtrar BP y contar ----------
+bp <- map2 %>%
+  filter(ONTOLOGY == "BP", !is.na(GO), !is.na(TERM)) %>%
+  distinct(TAIR, TERM)      # cuenta una vez por (gen, término)
+
+if (nrow(bp) == 0) stop("Ningún gen mapeó a términos GO-BP.")
+
+counts <- bp %>%
+  count(TERM, name = "n_genes") %>%
+  filter(n_genes >= min_genes) %>%
+  arrange(desc(n_genes))
+
+stopifnot(nrow(counts) > 0)
+counts_top <- counts %>% slice_head(n = top_n)
+
+# ---------- Plot ----------
+counts_top <- counts_top %>%
+  mutate(TERM_wrapped = forcats::fct_reorder(envolver(TERM, wrap_width), n_genes))
+
+titulo <- sprintf("GO-BP - Shade VOCs")
+subtit <- sprintf("Entry Genes: %d · BP Terms Shown: %d",
+                  length(genes_agi), nrow(counts_top))
+
+p <- ggplot(counts_top, aes(x = TERM_wrapped, y = n_genes, fill = n_genes)) +
+  geom_col() +
+  coord_flip(clip = "off") +
+  scale_fill_gradient(low = "#F5A3AC", high = "#EA6976") +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "",
+       y = "no. of associated genes",
+       title = titulo,
+       subtitle = subtit,
+       fill = "Genes") +
+  theme_classic(base_size = 12) +   # fondo blanco por defecto
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(lineheight = 0.95),
+    axis.line   = element_line(colour = "black", linewidth = 0.6),
+    axis.ticks  = element_line(colour = "black", linewidth = 0.6),
+    axis.text   = element_text(colour = "black", size = 11),
+    axis.title  = element_text(colour = "black", size = 12, face = "bold"),
+    # Márgenes contenidos: suficientes para etiquetas, pero sin “comerse” el panel
+    plot.margin = margin(t = 10, r = 14, b = 10, l = 00),
+    # aseguro blanco explícitamente en caso de temas globales
+    plot.background  = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA)
+  )
+
+print(p)
+
+# ---------- Guardar ----------
+base_name <- paste0("GO_BP_", gsub("[^A-Za-z0-9_]+", "_", columna_objetivo))
+png_path  <- file.path(salida_dir, paste0(base_name, ".png"))
+csv_path  <- file.path(salida_dir, paste0(base_name, ".csv"))
+ggsave(filename = png_path, plot = p, width = png_width_in, height = png_height_in, dpi = png_dpi)
+readr::write_csv(counts, csv_path)
+
+message("Listo ✅")
+message("Figura: ", normalizePath(png_path))
+message("Tabla : ", normalizePath(csv_path))
+
+# Guardar también versión con GO ID, por si hace falta
+bp_full <- map2 %>%
+  filter(ONTOLOGY == "BP", !is.na(GO), !is.na(TERM)) %>%
+  distinct(TAIR, GO, TERM)
+
+# ---- Función para inspeccionar genes de un término ----
+ver_genes <- function(patron, data = bp_full) {
+  salida <- data %>%
+    filter(stringr::str_detect(TERM, regex(patron, ignore_case = TRUE))) %>%
+    distinct(TERM, TAIR) %>%
+    arrange(TERM, TAIR)
+  
+  if (nrow(salida) == 0) {
+    message("⚠️ No se encontraron términos que coincidan con: ", patron)
+    return(invisible(NULL))
+  }
+  
+  # Mostrar en consola
+  terminos <- unique(salida$TERM)
+  for (t in terminos) {
+    genes <- salida %>% filter(TERM == t) %>% pull(TAIR)
+    cat("\n·", t, ":\n", paste(genes, collapse = ", "), "\n")
+  }
+  
+  return(invisible(salida))
+}
+
+# Buscar un término por palabra clave
+ver_genes("DNA-templated")
+
+# Buscar un término exacto (si lo copiaste del CSV o del gráfico)
+ver_genes("^cellular response to hypoxia$")
+
+# Ver genes de todos los términos del TOP actual
+for (t in counts_top$TERM) ver_genes(paste0("^", t, "$"))
