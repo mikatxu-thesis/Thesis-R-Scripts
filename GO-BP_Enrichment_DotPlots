@@ -1,0 +1,141 @@
+## ===========================
+## GO terms (TAIR) - DOTPLOT para listas de solapamiento
+## ===========================
+
+# Paquetes
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+for (pkg in c("clusterProfiler","org.At.tair.db","enrichplot","dplyr","ggplot2","readr")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) BiocManager::install(pkg, ask = FALSE, update = FALSE)
+}data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAYAAABWzo5XAAAAbElEQVR4Xs2RQQrAMAgEfZgf7W9LAguybljJpR3wEse5JOL3ZObDb4x1loDhHbBOFU6i2Ddnw2KNiXcdAXygJlwE8OFVBHDgKrLgSInN4WMe9iXiqIVsTMjH7z/GhNTEibOxQswcYIWYOR/zAjBJfiXh3jZ6AAAAAElFTkSuQmCC
+library(clusterProfiler)
+library(org.At.tair.db)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+## ===========================
+## PARÁMETROS
+## ===========================
+infile       <- ""   # <<-- pon aquí tu archivo con la lista de genes
+mi_columna   <- ""          # <<-- nombre de la columna del CSV con IDs TAIR
+mi_titulo    <- ""
+ont          <- "BP"               # GO Biological Process
+show_n       <- 12                 # nº máx de categorías a mostrar
+color_low    <- "#4B974F"          # color bajo
+color_high   <- "#D0D0D0"          # color alto
+outdir       <- ""  #Carpeta donde guardar resultados
+
+## ===========================
+## UNIVERSO
+## ===========================
+# Se asume que ya tienes un data.frame con tu RNAseq limpio en el entorno:
+# por ejemplo BionR2_clean con columna gene_id
+if (!exists("BionR2_clean")) stop("No encuentro 'BionR2_clean' en el entorno.")
+universe_tair <- BionR2_clean %>%
+  filter(!is.na(gene_id), nzchar(gene_id)) %>%
+  pull(gene_id) %>%
+  unique()
+
+## ===========================
+## 1) Cargar lista de solapamiento
+## ===========================
+df_list <- read.csv2(infile, header = TRUE, check.names = FALSE, stringsAsFactors = FALSE)
+names(df_list) <- trimws(names(df_list))
+
+if (!mi_columna %in% names(df_list)) {
+  stop(sprintf("La columna '%s' no existe en '%s'. Encabezados: %s",
+               mi_columna, infile, paste(names(df_list), collapse = ", ")))
+}
+
+genes_input <- df_list[[mi_columna]] %>%
+  as.character() %>% trimws() %>% unique()
+genes_input <- genes_input[!is.na(genes_input) & nzchar(genes_input)]
+genes_input <- intersect(genes_input, universe_tair)
+
+cat(sprintf("\n>> Lista '%s': %d genes (universo: %d)\n",
+            infile, length(genes_input), length(universe_tair)))
+
+if (length(genes_input) < 5) stop("Muy pocos genes tras cruzar con el universo.")
+
+## ===========================
+## 2) Enriquecimiento GO
+## ===========================
+ego <- enrichGO(
+  gene          = genes_input,
+  OrgDb         = org.At.tair.db,
+  keyType       = "TAIR",
+  universe      = universe_tair,
+  ont           = ont,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = FALSE
+)
+
+if (is.null(ego) || nrow(as.data.frame(ego)) == 0) {
+  stop("Sin términos enriquecidos para este set de solapamiento.")
+}
+
+## ===========================
+## 3) Dotplot
+## ===========================
+dot_theme <- theme_minimal(base_size = 16) +
+  theme(
+    axis.text.y      = element_text(size = 14, face = "bold"),
+    axis.text.x      = element_text(size = 13),
+    axis.title       = element_text(size = 14, face = "bold"),
+    plot.title       = element_text(size = 16, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p <- dotplot(ego, showCategory = show_n) +
+  aes(fill = p.adjust) +
+  scale_fill_gradient(low = color_low, high = color_high, name = "adj. p-value") +
+  guides(fill = guide_colorbar(reverse = TRUE)) +
+  dot_theme +
+  labs(title = mi_titulo)
+
+print(p)
+
+## ===========================
+## 4) Guardar resultados
+## ===========================
+dir.create(outdir, showWarnings = FALSE)
+base <- gsub("[^A-Za-z0-9_]+", "_", mi_titulo)
+
+write.csv(as.data.frame(ego),
+          file = file.path(outdir, paste0(base, "_table.csv")),
+          row.names = FALSE)
+
+ggsave(file.path(outdir, paste0(base, "_dot.png")),
+       p, width = 8, height = 6, dpi = 300, bg = "white")
+
+cat("\n✅ Resultados guardados en:", normalizePath(outdir), "\n")
+
+## ===========================
+## 5) Tabla extra: genes por término (formato columnas)
+## ===========================
+# Extraer tabla completa de resultados
+ego_df <- as.data.frame(ego)
+
+# Tomar los top N términos que salen en el dotplot
+ego_top <- ego_df %>% dplyr::slice_head(n = show_n)
+
+# Crear lista: cada GO term -> vector de genes TAIR
+gene_lists <- strsplit(ego_top$geneID, "/")
+
+# Poner como nombres las descripciones (GO terms)
+names(gene_lists) <- ego_top$Description
+
+# Convertir a tabla “ancha”: columnas = términos, filas = genes
+max_len <- max(lengths(gene_lists))
+gene_matrix <- lapply(gene_lists, function(x) c(x, rep(NA, max_len - length(x))))
+gene_table  <- as.data.frame(gene_matrix, stringsAsFactors = FALSE)
+
+# Guardar con el nombre de la columna de entrada
+outfile_genes <- file.path(outdir, paste0(mi_columna, "_genes_by_term.csv"))
+write.csv(gene_table, outfile_genes, row.names = FALSE)
+
+cat("\n✅ Tabla genes-por-término guardada en:", normalizePath(outfile_genes), "\n")
+
