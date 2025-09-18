@@ -1,0 +1,85 @@
+# --- Inputs ---
+file_counts   <- "250812_counts.csv"        # genes x replicas (crudos); col1=ATG
+file_coldata  <- "250812_coldata.csv"       # sample,treatment,time,replicate
+file_genesets <- "250812_genefamilies.csv"  # columnas = listas de ATGs
+gene_set_to_plot <- "KFBs"
+keep_order <- c("DMSO_8h","Bcc_8h","DMSO_24h","Bion_24h")
+
+# --- Paquetes ---
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(AnnotationDbi)
+  library(org.At.tair.db)
+  library(pheatmap)
+})
+
+# --- Lectura ---
+cts_raw   <- read.delim(file_counts, sep=";", check.names=FALSE)
+coldata   <- read.delim(file_coldata, sep=";")
+genesets  <- read.delim(file_genesets, sep=";", check.names=FALSE)
+stopifnot(all(c("sample","treatment","time") %in% colnames(coldata)))
+stopifnot(gene_set_to_plot %in% colnames(genesets))
+
+# --- Preparación counts ---
+names(cts_raw)[1] <- "ATG"
+cts <- cts_raw
+rownames(cts) <- cts$ATG; cts$ATG <- NULL
+cts[] <- lapply(cts, function(x){x <- suppressWarnings(as.numeric(x)); x[is.na(x)] <- 0; round(x)})
+cts <- cts[, as.character(coldata$sample), drop=FALSE]
+cts <- cts[rowSums(cts)>0, , drop=FALSE]
+
+# --- VST ---
+dds <- DESeqDataSetFromMatrix(countData=as.matrix(cts), colData=coldata, design=~ time + treatment + time:treatment)
+dds <- estimateSizeFactors(dds)
+vsd <- vst(dds, blind=TRUE)
+mat_vst <- assay(vsd)
+
+# --- Agregar por grupo y ordenar columnas ---
+group_vec <- paste(coldata$treatment, coldata$time, sep="_")
+mat_grp <- sapply(keep_order, function(g){ rowMeans(mat_vst[, group_vec==g, drop=FALSE]) })
+colnames(mat_grp) <- keep_order
+
+# --- Anotación columnas ---
+parts <- strsplit(colnames(mat_grp), "_", fixed=TRUE)
+ann_col <- data.frame(
+  treatment = factor(vapply(parts, `[`, "", 1), levels=c("DMSO","Bcc","Bion")),
+  time      = factor(vapply(parts, `[`, "", 2), levels=c("8h","24h")),
+  row.names = colnames(mat_grp)
+)
+
+# --- Subconjunto de genes (respeta orden de lista) ---
+genes_vec <- unique(na.omit(trimws(as.character(genesets[[gene_set_to_plot]]))))
+genes_present <- genes_vec[genes_vec %in% rownames(mat_grp)]
+stopifnot(length(genes_present)>0)
+mat_sub <- mat_grp[genes_present, , drop=FALSE]
+
+# --- Row Z-score ---
+mat_z <- t(scale(t(mat_sub))); mat_z[is.na(mat_z)] <- 0
+
+# --- Etiquetas con símbolo (si existe) ---
+clean_ids <- sub("\\.\\d+$","", rownames(mat_sub))
+syms <- AnnotationDbi::mapIds(org.At.tair.db, keys=clean_ids, column="SYMBOL", keytype="TAIR", multiVals="first")
+lab <- ifelse(!is.na(syms) & nzchar(syms), syms, rownames(mat_sub))
+rownames(mat_sub) <- rownames(mat_z) <- make.unique(lab)
+
+# --- Paleta ---
+pal <- colorRampPalette(c("#2c7bb6","#abd9e9","#f7f7f7","#fdae61","#d7191c"))(255)
+
+# --- Plot VST y Row Z ---
+dir.create("heatmaps_thesis", showWarnings=FALSE)
+pheatmap(mat_sub,
+         annotation_col=ann_col, color=pal,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         fontsize_row=11, fontsize_col=16,
+         filename=file.path("heatmaps_thesis", paste0(gene_set_to_plot,"_VST.png")), width=8, height=11)
+
+pheatmap(mat_z,
+         annotation_col=ann_col, color=pal,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         breaks=seq(-2,2,length.out=length(pal)+1),
+         fontsize_row=11, fontsize_col=16,
+         filename=file.path("heatmaps_thesis", paste0(gene_set_to_plot,"_rowZ.png")), width=8, height=11)
+
+# --- Export matriz usada (VST) ---
+write.csv(data.frame(Gene=rownames(mat_sub), mat_sub, check.names=FALSE),
+          file=file.path("heatmaps_thesis", paste0(gene_set_to_plot,"_matrix_used.csv")), row.names=FALSE)
